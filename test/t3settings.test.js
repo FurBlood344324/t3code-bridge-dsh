@@ -22,9 +22,10 @@ function tempDir(prefix = 't3settings-') {
 }
 
 const DSH = '/usr/local/bin/dsh';
+const BIN = '/home/me/projects/t3code-bridge-dsh/bin/t3code-bridge-dsh.js';
 
 function wanted(profile, extra = {}) {
-  return { profile, dshPath: DSH, ...extra };
+  return { profile, binPath: BIN, ...extra };
 }
 
 function owned(profile, extra = {}) {
@@ -52,8 +53,8 @@ test('instanceId: lowercase dsh prefix, non alphanumerics collapsed', () => {
   assert.throws(() => instanceId('---'), /no \[a-z0-9\]/i);
 });
 
-test('buildInstance: ACP registry shape with the -acp variant profile', () => {
-  const value = buildInstance({ profile: 'web', dshPath: DSH, accentColor: '#123456' });
+test('buildInstance: ACP registry shape running the bridge launcher', () => {
+  const value = buildInstance({ profile: 'web', binPath: BIN, accentColor: '#123456' });
   assert.deepEqual(value, {
     driver: 'acpRegistry',
     enabled: true,
@@ -61,60 +62,60 @@ test('buildInstance: ACP registry shape with the -acp variant profile', () => {
     accentColor: '#123456',
     config: {
       source: 'local',
-      commandPath: DSH,
-      commandArgs: ['--profile', 'web-acp'],
+      commandPath: BIN,
+      commandArgs: ['launch', 'web'],
       enabled: true,
     },
   });
-  assert.equal(buildInstance({ profile: 'web', dshPath: DSH }).accentColor, undefined);
-  assert.throws(() => buildInstance({ dshPath: DSH }), /profile is required/);
-  assert.throws(() => buildInstance({ profile: 'web' }), /dshPath is required/);
+  assert.equal(buildInstance({ profile: 'web', binPath: BIN }).accentColor, undefined);
+  assert.throws(() => buildInstance({ binPath: BIN }), /profile is required/);
+  assert.throws(() => buildInstance({ profile: 'web' }), /binPath is required/);
+  assert.throws(() => buildInstance({ profile: 'Web', binPath: BIN }), /must be a dsh profile name/);
+  assert.throws(() => buildInstance({ profile: 'web acp', binPath: BIN }), /must be a dsh profile name/);
+  // the M1 key still works as a deprecated alias
+  assert.equal(buildInstance({ profile: 'web', dshPath: DSH }).config.commandPath, DSH);
+  assert.equal(buildInstance({ profile: 'web', binPath: BIN, dshPath: DSH }).config.commandPath, BIN);
 });
 
-test('isOwnedInstance: id shape + driver + --profile <x>-acp, nothing else', () => {
+test('isOwnedInstance: id shape + driver + launch <profile>, and the slug must match the id', () => {
   assert.equal(isOwnedInstance('dsh-web', owned('web')), true);
-  assert.equal(isOwnedInstance('dsh-acp', owned('acp')), true);
+  assert.equal(isOwnedInstance('dsh-dsh-tui', owned('dsh.tui')), true);
   // foreign ids / other drivers / other commands are never owned
   assert.equal(isOwnedInstance('Web', owned('web')), false);
   assert.equal(isOwnedInstance('other-agent', owned('web')), false);
   assert.equal(isOwnedInstance('dsh-web', { ...owned('web'), driver: 'claudeAgent' }), false);
-  assert.equal(isOwnedInstance('dsh-web', buildInstance({ profile: 'acp', dshPath: DSH })), true);
   assert.equal(
     isOwnedInstance('dsh-web', {
       ...owned('web'),
-      config: { ...owned('web').config, commandArgs: ['--profile', 'web'] },
+      config: { ...owned('web').config, commandArgs: ['--profile', 'web-acp'] },
     }),
     false,
+    'the M1 shape is not the shape we write any more',
   );
   assert.equal(
     isOwnedInstance('dsh-web', {
       ...owned('web'),
-      config: { ...owned('web').config, commandArgs: ['--profile', 'web-acp', '--x'] },
-    }),
-    false,
-  );
-  // any non-empty <variant>-acp counts as ours; a bare profile name does not
-  assert.equal(
-    isOwnedInstance('dsh-web', {
-      ...owned('web'),
-      config: { ...owned('web').config, commandArgs: ['--profile', 'my team-acp'] },
-    }),
-    false,
-    'a space is not part of a variant name',
-  );
-  // strict on purpose: a false negative only means "conflict, left alone",
-  // while a false positive would delete an instance this tool did not create
-  assert.equal(
-    isOwnedInstance('dsh-web', {
-      ...owned('web'),
-      config: { ...owned('web').config, commandArgs: ['--profile', 'ds bot-acp'] },
+      config: { ...owned('web').config, commandArgs: ['launch', 'web', '--x'] },
     }),
     false,
   );
   assert.equal(
-    isOwnedInstance('dsh-web', { ...owned('web'), config: { ...owned('web').config, commandArgs: ['--profile', '-acp'] } }),
+    isOwnedInstance('dsh-web', { ...owned('web'), config: { ...owned('web').config, commandArgs: ['launch', 'web-acp'] } }),
     false,
-    'an empty variant name is not ours',
+    'the launcher takes the source profile name, not the variant',
+  );
+  // an instance whose command and id disagree is not a pair we wrote
+  assert.equal(
+    isOwnedInstance('dsh-web', { ...owned('web'), config: { ...owned('web').config, commandArgs: ['launch', 'dsbot'] } }),
+    false,
+  );
+  assert.equal(
+    isOwnedInstance('dsh-web', { ...owned('web'), config: { ...owned('web').config, commandArgs: ['launch', 'Web'] } }),
+    false,
+  );
+  assert.equal(
+    isOwnedInstance('dsh-web', { ...owned('web'), config: { ...owned('web').config, commandArgs: ['launch', ''] } }),
+    false,
   );
   assert.equal(isOwnedInstance('dsh-web', null), false);
   assert.equal(isOwnedInstance('dsh-web', 'nope'), false);
@@ -143,17 +144,17 @@ test('planSettings: adds, reports unchanged, changes, and removes stale owned in
   assert.deepEqual(Object.keys(settings.providerInstances).sort(), ['claude-1', 'dsh-old', 'dsh-web']);
 });
 
-test('planSettings: a changed displayName or dsh path is reported and applied', () => {
+test('planSettings: the launcher path is re-applied, but a user-chosen displayName is kept', () => {
   const settings = { providerInstances: { 'dsh-web': owned('web', { displayName: 'Old name' }) } };
 
   const renamed = planSettings(settings, [wanted('web', { displayName: 'DSH web (beta)' })]);
-  assert.deepEqual(renamed.changed, ['dsh-web']);
-  assert.equal(renamed.next.providerInstances['dsh-web'].displayName, 'DSH web (beta)');
+  assert.deepEqual(renamed.unchanged, ['dsh-web']);
+  assert.equal(renamed.next.providerInstances['dsh-web'].displayName, 'Old name');
 
-  const moved = planSettings(settings, [{ profile: 'web', dshPath: '/opt/dsh' }]);
+  const moved = planSettings(settings, [{ profile: 'web', binPath: '/opt/bridge/bin/t3code-bridge-dsh.js' }]);
   assert.deepEqual(moved.changed, ['dsh-web']);
-  assert.equal(moved.next.providerInstances['dsh-web'].config.commandPath, '/opt/dsh');
-  assert.deepEqual(moved.next.providerInstances['dsh-web'].config.commandArgs, ['--profile', 'web-acp']);
+  assert.equal(moved.next.providerInstances['dsh-web'].config.commandPath, '/opt/bridge/bin/t3code-bridge-dsh.js');
+  assert.deepEqual(moved.next.providerInstances['dsh-web'].config.commandArgs, ['launch', 'web']);
 });
 
 test('planSettings: keeps per-instance state T3 added to an owned instance', () => {
@@ -170,9 +171,10 @@ test('planSettings: an accent colour the user set in T3 is not wiped by a bare w
   assert.deepEqual(plan.unchanged, ['dsh-web']);
   assert.equal(plan.next.providerInstances['dsh-web'].accentColor, '#ff0000');
 
+  // a colour the user already has wins over the one in `wanted`
   const recoloured = planSettings({ providerInstances: { 'dsh-web': current } }, [wanted('web', { accentColor: '#00ff00' })]);
-  assert.deepEqual(recoloured.changed, ['dsh-web']);
-  assert.equal(recoloured.next.providerInstances['dsh-web'].accentColor, '#00ff00');
+  assert.deepEqual(recoloured.unchanged, ['dsh-web']);
+  assert.equal(recoloured.next.providerInstances['dsh-web'].accentColor, '#ff0000');
 });
 
 test('planSettings: a foreign instance on the same id is a conflict and stays untouched', () => {
@@ -188,10 +190,10 @@ test('planSettings: a foreign instance on the same id is a conflict and stays un
 });
 
 test('planSettings: two different profiles that slug to one id are a reported conflict, not a silent overwrite', () => {
-  const plan = planSettings({}, [wanted('ds bot'), wanted('ds-bot')]);
-  assert.deepEqual(plan.added, ['dsh-ds-bot']);
-  assert.deepEqual(plan.conflicts, ['dsh-ds-bot']);
-  assert.deepEqual(plan.next.providerInstances['dsh-ds-bot'].config.commandArgs, ['--profile', 'ds bot-acp']);
+  const plan = planSettings({}, [wanted('dsh.tui'), wanted('dsh-tui')]);
+  assert.deepEqual(plan.added, ['dsh-dsh-tui']);
+  assert.deepEqual(plan.conflicts, ['dsh-dsh-tui']);
+  assert.deepEqual(plan.next.providerInstances['dsh-dsh-tui'].config.commandArgs, ['launch', 'dsh.tui']);
 
   const repeat = planSettings({}, [wanted('web'), wanted('web')]);
   assert.deepEqual(repeat.added, ['dsh-web']);
@@ -356,11 +358,18 @@ test('writeSettings: creates the file (and its dirs) when missing, without a bac
   assert.equal(fs.statSync(file).mode & 0o777, 0o600, 'new file is private');
 });
 
-test('planSettings: the variant argument keeps the profile name as written, only the id is slugged', () => {
-  const plan = planSettings({}, [wanted('DS Bot')]);
-  const value = plan.next.providerInstances['dsh-ds-bot'];
-  assert.deepEqual(value.config.commandArgs, ['--profile', 'DS Bot-acp']);
-  assert.equal(value.displayName, 'DSH DS Bot');
+test('planSettings: the profile name reaches the command as written, only the id is slugged', () => {
+  const plan = planSettings({}, [wanted('dsh.tui')]);
+  const value = plan.next.providerInstances['dsh-dsh-tui'];
+  assert.deepEqual(value.config.commandArgs, ['launch', 'dsh.tui']);
+  assert.equal(value.displayName, 'DSH dsh.tui');
+});
+
+test('planSettings: a profile name the launcher cannot run is a conflict, never an instance', () => {
+  const plan = planSettings({}, [wanted('DS Bot'), wanted('')]);
+  assert.deepEqual(plan.added, []);
+  assert.deepEqual(plan.conflicts, ['dsh-ds-bot', '(invalid profile name)']);
+  assert.deepEqual(Object.keys(plan.next.providerInstances ?? {}), []);
 });
 
 test('writeSettings: a second sync of the same profiles is a no-op (idempotent through the file)', () => {
@@ -397,4 +406,37 @@ test('writeSettings: install then uninstall round-trips the user settings', () =
   writeSettings(file, removal.next);
   assert.deepEqual(removal.removed.sort(), ['dsh-dsbot', 'dsh-web']);
   assert.deepEqual(readSettings(file), user);
+});
+
+test('planSettings: user-disabled instance stays disabled; empty wanted prunes nothing', () => {
+  const current = owned('web');
+  current.enabled = false;
+  current.config.enabled = false;
+  const plan = planSettings({ providerInstances: { 'dsh-web': current } }, [wanted('web')]);
+  assert.deepEqual(plan.unchanged, ['dsh-web']);
+  assert.equal(plan.next.providerInstances['dsh-web'].enabled, false);
+  const none = planSettings({ providerInstances: { 'dsh-web': current } }, []);
+  assert.deepEqual(none.removedStale, []);
+  assert.ok(none.next.providerInstances['dsh-web']);
+});
+
+test('writeSettings: refuses to overwrite a file that changed since it was read (expect)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-expect-'));
+  const file = path.join(dir, 'settings.json');
+  fs.writeFileSync(file, JSON.stringify({ a: 1 }));
+  const seen = readSettings(file);
+  fs.writeFileSync(file, JSON.stringify({ a: 1, t3Added: true }));
+  assert.throws(() => writeSettings(file, { a: 2 }, { expect: seen }), /changed while the plan/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { a: 1, t3Added: true });
+});
+
+test('writeSettings: a symlinked settings file stays a symlink and its target is updated', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-link-'));
+  const target = path.join(dir, 'real.json');
+  const link = path.join(dir, 'settings.json');
+  fs.writeFileSync(target, JSON.stringify({ a: 1 }));
+  fs.symlinkSync(target, link);
+  writeSettings(link, { a: 2 });
+  assert.ok(fs.lstatSync(link).isSymbolicLink());
+  assert.deepEqual(JSON.parse(fs.readFileSync(target, 'utf8')), { a: 2 });
 });

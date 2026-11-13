@@ -4,16 +4,17 @@
 // strip unknown config keys, so an id like `dsh-web` could come back without any
 // marker we wrote. The rule (see docs/SPEC-M1.md):
 //   id matches /^dsh-[a-z0-9][a-z0-9-]*$/  AND  driver === "acpRegistry"
-//   AND  config.commandArgs === ["--profile", "<something>-acp"].
+//   AND  config.commandArgs === ["launch", "<profile>"]  where <profile> is a dsh
+//   profile name whose slug equals the id suffix (the launcher appends `-acp`).
 
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 const OWNED_ID_RE = /^dsh-[a-z0-9][a-z0-9-]*$/;
-// the spec's shape is `["--profile", "<something>-acp"]`: any non-empty, whitespace-free
-// variant name, so a profile we did not name ourselves is still recognised as ours
-const OWNED_VARIANT_RE = /^\S+-acp$/;
+const OWNED_ID_PREFIX = 'dsh-';
+// The shape the launcher accepts (src/launch.js): a dsh profile directory name.
+const PROFILE_NAME_RE = /^[a-z0-9][a-z0-9._-]*$/;
 const DRIVER = 'acpRegistry';
 const BACKUP_SUFFIX = 'bridge-dsh';
 
@@ -26,28 +27,44 @@ export function t3SettingsPath(env = process.env) {
   return path.join(home, 'userdata', 'settings.json');
 }
 
+/** Profile name -> id suffix: lowercased, every non `[a-z0-9]` run collapsed to `-`. */
+function profileSlug(profile) {
+  return profile
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
 /** `"dsh-" + profile` lowercased, every non `[a-z0-9]` run collapsed to `-`. */
 export function instanceId(profile) {
   if (typeof profile !== 'string' || profile.trim() === '') {
     throw new Error('a profile name is required to build a T3 instance id');
   }
-  const slug = profile
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
+  const slug = profileSlug(profile);
   if (slug === '') {
     throw new Error(`profile name "${profile}" has no [a-z0-9] characters, cannot build a T3 instance id`);
   }
-  return `dsh-${slug}`;
+  return `${OWNED_ID_PREFIX}${slug}`;
 }
 
-/** The provider instance value T3 stores for one dsh profile. */
-export function buildInstance({ profile, dshPath, displayName, accentColor } = {}) {
+/**
+ * The provider instance value T3 stores for one dsh profile.
+ * T3 starts `commandPath commandArgs...`: our launcher, which resolves the keys and execs
+ * `dsh --profile <profile>-acp --patch <overlay>`.
+ */
+export function buildInstance({ profile, binPath, dshPath, displayName, accentColor } = {}) {
   if (typeof profile !== 'string' || profile.trim() === '') {
     throw new Error('buildInstance: profile is required');
   }
-  if (typeof dshPath !== 'string' || dshPath.trim() === '') {
-    throw new Error('buildInstance: dshPath is required');
+  if (!PROFILE_NAME_RE.test(profile)) {
+    throw new Error(
+      `buildInstance: profile must be a dsh profile name ([a-z0-9][a-z0-9._-]*), got ${profile.length} characters`,
+    );
+  }
+  // `dshPath` is the M1 name and stays a deprecated alias so an old caller keeps working.
+  const command = typeof binPath === 'string' && binPath.trim() !== '' ? binPath : dshPath;
+  if (typeof command !== 'string' || command.trim() === '') {
+    throw new Error('buildInstance: binPath is required');
   }
   const value = {
     driver: DRIVER,
@@ -55,8 +72,8 @@ export function buildInstance({ profile, dshPath, displayName, accentColor } = {
     displayName: displayName || `DSH ${profile}`,
     config: {
       source: 'local',
-      commandPath: dshPath,
-      commandArgs: ['--profile', `${profile}-acp`],
+      commandPath: command,
+      commandArgs: ['launch', profile],
       enabled: true,
     },
   };
@@ -67,7 +84,7 @@ export function buildInstance({ profile, dshPath, displayName, accentColor } = {
   return value;
 }
 
-/** True only for a settings key this tool owns (id shape + driver + command shape). */
+/** True only for a settings key this tool owns (id shape + driver + launch command shape). */
 export function isOwnedInstance(id, value) {
   if (typeof id !== 'string' || !OWNED_ID_RE.test(id)) return false;
   if (!isPlainObject(value)) return false;
@@ -76,8 +93,12 @@ export function isOwnedInstance(id, value) {
   if (!isPlainObject(config)) return false;
   const args = config.commandArgs;
   if (!Array.isArray(args) || args.length !== 2) return false;
-  if (args[0] !== '--profile') return false;
-  return typeof args[1] === 'string' && OWNED_VARIANT_RE.test(args[1]);
+  if (args[0] !== 'launch') return false;
+  const profile = args[1];
+  if (typeof profile !== 'string' || !PROFILE_NAME_RE.test(profile)) return false;
+  // The profile the launcher runs is the one the id was derived from: an instance whose
+  // command and id disagree is not a pair we wrote, so it stays someone else's.
+  return profileSlug(profile) === id.slice(OWNED_ID_PREFIX.length);
 }
 
 /**
@@ -106,6 +127,17 @@ export function planSettings(settingsObj, wanted) {
 
   for (const item of wanted) {
     const profile = item && item.profile;
+    if (typeof profile !== 'string' || !PROFILE_NAME_RE.test(profile)) {
+      // A name the launcher cannot run must not become an instance we then fail to own.
+      let id = '(invalid profile name)';
+      try {
+        id = instanceId(profile);
+      } catch {
+        /* keep the placeholder */
+      }
+      conflicts.push(id);
+      continue;
+    }
     const id = instanceId(profile);
     if (wantedIds.has(id)) {
       // the same profile twice is just a repeated input; two different profiles
@@ -137,7 +169,8 @@ export function planSettings(settingsObj, wanted) {
     }
   }
 
-  for (const id of Object.keys(instances)) {
+  // An empty `wanted` is "nothing selected", not "remove everything": `uninstall` does that.
+  for (const id of wantedIds.size === 0 ? [] : Object.keys(instances)) {
     if (wantedIds.has(id)) continue;
     if (!isOwnedInstance(id, instances[id])) continue;
     delete instances[id];
@@ -190,14 +223,25 @@ export function readSettings(settingsPath) {
  * same dir + rename), 2-space JSON plus a trailing newline, file mode preserved.
  * Invalid current JSON throws before anything is touched. Dry run writes nothing.
  */
-export function writeSettings(settingsPath, next, { dryRun = false } = {}) {
+export function writeSettings(settingsPath, next, { dryRun = false, expect } = {}) {
   if (typeof settingsPath !== 'string' || settingsPath.trim() === '') {
     throw new Error('writeSettings: path is required');
   }
   if (!isPlainObject(next)) throw new Error('writeSettings: next must be an object');
-  const abs = path.resolve(settingsPath);
+  // A symlinked settings.json (dotfile managers) must stay a symlink: write to its target.
+  let abs = path.resolve(settingsPath);
+  try {
+    abs = fs.realpathSync(abs);
+  } catch {
+    /* missing file: created below */
+  }
 
   const current = readCurrent(abs); // validates the current file before any write
+  // Optimistic lock: `expect` is the object `next` was derived from. If T3 rewrote the file
+  // since the caller read it, writing `next` would silently drop T3's change.
+  if (expect !== undefined && current.exists && stableStringify(current.value) !== stableStringify(expect)) {
+    throw new Error(`T3 settings changed while the plan was being made, nothing written: ${abs} (run again)`);
+  }
   const created = !current.exists;
   const text = `${JSON.stringify(next, null, 2)}\n`;
   const unchanged = !created && stableStringify(current.value) === stableStringify(next);
@@ -216,8 +260,18 @@ export function writeSettings(settingsPath, next, { dryRun = false } = {}) {
   const mode = current.exists ? current.mode : 0o600;
   const tmp = path.join(dir, `.${path.basename(abs)}.tmp-${process.pid}-${Date.now()}`);
   try {
-    fs.writeFileSync(tmp, text, { mode });
+    const fd = fs.openSync(tmp, 'w', mode);
+    try {
+      fs.writeSync(fd, text);
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
     fs.chmodSync(tmp, mode);
+    // last look right before the swap: shrink the race window to the rename itself
+    if (current.exists && fs.readFileSync(abs, 'utf8') !== current.raw) {
+      throw new Error(`T3 settings changed during the write, nothing written: ${abs} (run again)`);
+    }
     fs.renameSync(tmp, abs);
   } catch (err) {
     try {
@@ -236,19 +290,22 @@ function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+/**
+ * Re-apply only what makes the instance run our launcher (driver, source, command,
+ * args). Everything else (enabled, displayName, accentColor, anything T3 or the user
+ * added) stays as the user left it; a field is filled only when it is missing.
+ */
 function mergeInstance(current, desired) {
   const currentConfig = isPlainObject(current.config) ? current.config : {};
-  // an `undefined` in desired means "not specified": keep what is already there
-  // (e.g. an accent colour the user picked in T3's own UI)
-  const defined = {};
+  const dc = desired.config ?? {};
+  const config = { ...currentConfig, source: dc.source, commandPath: dc.commandPath, commandArgs: dc.commandArgs };
+  if (config.enabled === undefined && dc.enabled !== undefined) config.enabled = dc.enabled;
+  const merged = { ...current, driver: desired.driver, config };
   for (const [key, item] of Object.entries(desired)) {
-    if (item !== undefined) defined[key] = item;
+    if (key === 'driver' || key === 'config' || item === undefined) continue;
+    if (merged[key] === undefined) merged[key] = item;
   }
-  const config = { ...currentConfig, ...desired.config };
-  for (const [key, item] of Object.entries(config)) {
-    if (item === undefined) delete config[key];
-  }
-  return { ...current, ...defined, config };
+  return merged;
 }
 
 function parseSettings(raw, abs) {
@@ -277,7 +334,7 @@ function readCurrent(abs) {
   }
   if (!stat.isFile()) throw new Error(`T3 settings path is not a file: ${abs}`);
   const raw = fs.readFileSync(abs, 'utf8');
-  return { exists: true, value: parseSettings(raw, abs), mode: stat.mode & 0o777 };
+  return { exists: true, value: parseSettings(raw, abs), raw, mode: stat.mode & 0o777 };
 }
 
 function backupFile(abs) {

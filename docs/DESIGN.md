@@ -42,8 +42,11 @@ No T3 patching. The package is a CLI that produces configuration:
           1. ensure an ACP-capable variant profile `P-acp` under $DSH_HOME/profiles:
              package.json = P's package.json with the app bundle replaced by @deepseek-ai/dsh-acp-app
              (plugin bundles, dependencies and cordis.patch.yml kept; patch.yml copied, with a header marker)
-          2. add T3 provider instance `dsh-P` {driver: acpRegistry, config: {source: local, commandPath: <dsh path>,
-             commandArgs: [--profile, P-acp]}, displayName: "DSH P"} to settings.json
+          2. add T3 provider instance `dsh-P` {driver: acpRegistry, config: {source: local, commandPath: <bin path>,
+             commandArgs: [launch, P]}, displayName: "DSH P"} to settings.json
+          The instance runs the bridge launcher (`bin/t3code-bridge-dsh.js`, shebang + mode 755), which resolves keys
+          and execs `dsh --profile P-acp --patch <overlay>`; an instance pointed at raw `dsh` is not one this tool
+          wrote, so it is reported as a conflict and left alone.
           settings.json edits: backup first, atomic write, only touch keys owned by this tool (`dsh-*` instances
           carrying the marker), idempotent.
     t3code-bridge-dsh uninstall [--profile p|--all]
