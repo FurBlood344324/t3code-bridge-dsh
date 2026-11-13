@@ -8,8 +8,11 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
-/** App bundles: at most one per profile, and the ACP variant must not carry any. */
-export const APP_BUNDLES = Object.freeze([
+/**
+ * App bundles: at most one per profile, and no ACP variant carries any. Callers that need a different
+ * set pass `appBundles` to the planning functions instead of mutating this list.
+ */
+export const APP_BUNDLES = [
   "@deepseek-ai/dsh-web-app",
   "@deepseek-ai/dsh-headless",
   "@deepseek-ai/dsh-sdk-app",
@@ -17,7 +20,7 @@ export const APP_BUNDLES = Object.freeze([
   "ds-bot",
   "@deepseek-harness-tui/dsh-tui",
   "@open-design/dsh-runtime",
-]);
+];
 
 /** The ACP app bundle every generated variant runs. */
 export const ACP_BUNDLE = "@deepseek-ai/dsh-acp-app";
@@ -81,10 +84,22 @@ export function readProfile(dir) {
 }
 
 /**
+ * What sits at `<home>/profiles/<name>-acp`: "absent" (nothing there), "owned" (this tool's variant,
+ * carries VARIANT_MARKER) or "unowned" (something else: the caller must not overwrite it).
+ */
+export function variantState(name, { home = dshHome() } = {}) {
+  const dir = join(home, "profiles", variantName(name));
+  if (!existsSync(dir)) return "absent";
+  return existsSync(join(dir, VARIANT_MARKER)) ? "owned" : "unowned";
+}
+
+/**
  * List profiles under `<home>/profiles`.
  * Directories without a usable package.json are skipped, as are dot-directories.
  * @returns {Array<{name: string, dir: string, bundles: string[], appBundles: string[],
  *   isVariant: boolean, variantName: string, variantExists: boolean}>}
+ * `variantExists` is literal: anything at `<home>/profiles/<name>-acp` counts. `variantState` tells an
+ * unowned directory (user data, never overwritten) from this tool's own variant.
  */
 export function listProfiles({ home = dshHome() } = {}) {
   const profilesDir = join(home, "profiles");
@@ -115,9 +130,9 @@ export function listProfiles({ home = dshHome() } = {}) {
       appBundles: profile.bundles.filter((bundle) => appSet.has(bundle)),
       isVariant: existsSync(join(dir, VARIANT_MARKER)),
       variantName: variant,
-      // A variant "exists" only when it carries the marker: an unmarked directory of the same name
-      // is user data this tool must not claim.
-      variantExists: existsSync(join(profilesDir, variant, VARIANT_MARKER)),
+      // Literal existence: an unmarked directory of that name is reported here too, while
+      // variantState("unowned") marks it as user data this tool must not claim or overwrite.
+      variantExists: existsSync(join(profilesDir, variant)),
     });
   }
   return profiles;

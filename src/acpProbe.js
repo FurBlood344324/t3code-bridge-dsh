@@ -39,6 +39,9 @@ export async function probeAcp({
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
+      // own process group on POSIX so a timeout can take the agent's children
+      // (dsh spawns its mcp bridge) down with it, not only the direct child
+      detached: process.platform !== 'win32',
     });
   } catch (err) {
     return { ok: false, error: `cannot start ${command}: ${err && err.message}`, ms: elapsed() };
@@ -48,6 +51,8 @@ export async function probeAcp({
     let settled = false;
     let stderrTail = '';
     let deadlineTimer = null;
+    // what the agent has told us so far; a later failure still reports it
+    const state = { initialize: {} };
 
     const finish = async (result) => {
       if (settled) return;
@@ -70,7 +75,8 @@ export async function probeAcp({
 
     deadlineTimer = setTimeout(() => {
       const detail = stderrTail.trim() ? `; stderr: ${truncate(stderrTail.trim(), 400)}` : '';
-      fail(`no ACP answer within ${timeoutMs}ms${detail}`);
+      // keep whatever the agent already told us: doctor can still show it
+      fail(`no ACP answer within ${timeoutMs}ms${detail}`, state.initialize);
     }, Math.min(Math.max(1, timeoutMs), 2 ** 31 - 1));
 
     child.on('error', (err) => {
@@ -81,14 +87,12 @@ export async function probeAcp({
     child.on('exit', (code, signal) => {
       const how = signal ? `signal ${signal}` : `code ${code}`;
       const detail = stderrTail.trim() ? `; stderr: ${truncate(stderrTail.trim(), 400)}` : '';
-      fail(`ACP agent exited before answering (${how})${detail}`);
+      fail(`ACP agent exited before answering (${how})${detail}`, state.initialize);
     });
 
     child.stdin?.on('error', () => {
       /* EPIPE when the agent dies: the exit handler reports it */
     });
-
-    const state = { initialize: {} };
 
     let buffered = '';
     child.stdout?.setEncoding('utf8');
@@ -205,25 +209,35 @@ function killChild(child, graceMs) {
     }
     let hard = null;
     let bail = null;
+    // a child that never started (ENOENT) can still emit an 'error' on kill;
+    // without a listener that would escape as an uncaught exception.
+    child.on('error', () => {});
     const done = () => {
       clearTimeout(hard);
       clearTimeout(bail);
       resolve();
     };
     child.once('exit', done);
-    try {
-      child.kill('SIGTERM');
-    } catch {
-      done();
-      return;
-    }
-    hard = setTimeout(() => {
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        done();
-      }
-    }, graceMs);
+    signalChild(child, 'SIGTERM');
+    hard = setTimeout(() => signalChild(child, 'SIGKILL'), graceMs);
+    // never hang the caller on a wedged child: report the timeout instead
     bail = setTimeout(done, graceMs * 4);
   });
+}
+
+/** Signal the child and, when it leads its own group, the whole group. */
+function signalChild(child, signal) {
+  if (typeof child.pid === 'number' && process.platform !== 'win32') {
+    try {
+      process.kill(-child.pid, signal); // negative pid = process group
+      return;
+    } catch {
+      /* group gone or not a group leader: fall through to the direct child */
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    /* already gone */
+  }
 }

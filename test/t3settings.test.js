@@ -73,7 +73,7 @@ test('buildInstance: ACP registry shape with the -acp variant profile', () => {
 
 test('isOwnedInstance: id shape + driver + --profile <x>-acp, nothing else', () => {
   assert.equal(isOwnedInstance('dsh-web', owned('web')), true);
-  assert.equal(isOwnedInstance('dsh-web', owned('web')), true);
+  assert.equal(isOwnedInstance('dsh-acp', owned('acp')), true);
   // foreign ids / other drivers / other commands are never owned
   assert.equal(isOwnedInstance('Web', owned('web')), false);
   assert.equal(isOwnedInstance('other-agent', owned('web')), false);
@@ -92,6 +92,29 @@ test('isOwnedInstance: id shape + driver + --profile <x>-acp, nothing else', () 
       config: { ...owned('web').config, commandArgs: ['--profile', 'web-acp', '--x'] },
     }),
     false,
+  );
+  // any non-empty <variant>-acp counts as ours; a bare profile name does not
+  assert.equal(
+    isOwnedInstance('dsh-web', {
+      ...owned('web'),
+      config: { ...owned('web').config, commandArgs: ['--profile', 'my team-acp'] },
+    }),
+    false,
+    'a space is not part of a variant name',
+  );
+  // strict on purpose: a false negative only means "conflict, left alone",
+  // while a false positive would delete an instance this tool did not create
+  assert.equal(
+    isOwnedInstance('dsh-web', {
+      ...owned('web'),
+      config: { ...owned('web').config, commandArgs: ['--profile', 'ds bot-acp'] },
+    }),
+    false,
+  );
+  assert.equal(
+    isOwnedInstance('dsh-web', { ...owned('web'), config: { ...owned('web').config, commandArgs: ['--profile', '-acp'] } }),
+    false,
+    'an empty variant name is not ours',
   );
   assert.equal(isOwnedInstance('dsh-web', null), false);
   assert.equal(isOwnedInstance('dsh-web', 'nope'), false);
@@ -141,6 +164,17 @@ test('planSettings: keeps per-instance state T3 added to an owned instance', () 
   assert.equal(plan.next.providerInstances['dsh-web'].config.model, 'deepseek/deepseek-chat');
 });
 
+test('planSettings: an accent colour the user set in T3 is not wiped by a bare wanted entry', () => {
+  const current = owned('web', { accentColor: '#ff0000' });
+  const plan = planSettings({ providerInstances: { 'dsh-web': current } }, [wanted('web')]);
+  assert.deepEqual(plan.unchanged, ['dsh-web']);
+  assert.equal(plan.next.providerInstances['dsh-web'].accentColor, '#ff0000');
+
+  const recoloured = planSettings({ providerInstances: { 'dsh-web': current } }, [wanted('web', { accentColor: '#00ff00' })]);
+  assert.deepEqual(recoloured.changed, ['dsh-web']);
+  assert.equal(recoloured.next.providerInstances['dsh-web'].accentColor, '#00ff00');
+});
+
 test('planSettings: a foreign instance on the same id is a conflict and stays untouched', () => {
   const foreign = { driver: 'codex', displayName: 'Mine', config: { command: 'codex' } };
   const settings = { providerInstances: { 'dsh-web': foreign, 'dsh-keep': owned('keep') } };
@@ -151,6 +185,17 @@ test('planSettings: a foreign instance on the same id is a conflict and stays un
   assert.deepEqual(plan.changed, []);
   assert.deepEqual(plan.removedStale, []);
   assert.deepEqual(plan.next.providerInstances['dsh-web'], foreign);
+});
+
+test('planSettings: two different profiles that slug to one id are a reported conflict, not a silent overwrite', () => {
+  const plan = planSettings({}, [wanted('ds bot'), wanted('ds-bot')]);
+  assert.deepEqual(plan.added, ['dsh-ds-bot']);
+  assert.deepEqual(plan.conflicts, ['dsh-ds-bot']);
+  assert.deepEqual(plan.next.providerInstances['dsh-ds-bot'].config.commandArgs, ['--profile', 'ds bot-acp']);
+
+  const repeat = planSettings({}, [wanted('web'), wanted('web')]);
+  assert.deepEqual(repeat.added, ['dsh-web']);
+  assert.deepEqual(repeat.conflicts, [], 'the very same profile twice is not a conflict');
 });
 
 test('planSettings: creates providerInstances when the settings have none', () => {
@@ -309,6 +354,34 @@ test('writeSettings: creates the file (and its dirs) when missing, without a bac
   assert.equal(result.backupPath, null);
   assert.deepEqual(readSettings(file).providerInstances['dsh-web'], owned('web'));
   assert.equal(fs.statSync(file).mode & 0o777, 0o600, 'new file is private');
+});
+
+test('planSettings: the variant argument keeps the profile name as written, only the id is slugged', () => {
+  const plan = planSettings({}, [wanted('DS Bot')]);
+  const value = plan.next.providerInstances['dsh-ds-bot'];
+  assert.deepEqual(value.config.commandArgs, ['--profile', 'DS Bot-acp']);
+  assert.equal(value.displayName, 'DSH DS Bot');
+});
+
+test('writeSettings: a second sync of the same profiles is a no-op (idempotent through the file)', () => {
+  const dir = tempDir();
+  const file = path.join(dir, 'settings.json');
+  fs.writeFileSync(file, `${JSON.stringify({ theme: 'dark' }, null, 2)}\n`);
+
+  writeSettings(file, planSettings(readSettings(file), [wanted('web'), wanted('dsbot')]).next);
+  const first = fs.readFileSync(file, 'utf8');
+
+  const second = planSettings(readSettings(file), [wanted('web'), wanted('dsbot')]);
+  assert.deepEqual(second.added, []);
+  assert.deepEqual(second.changed, []);
+  assert.deepEqual(second.unchanged.sort(), ['dsh-dsbot', 'dsh-web']);
+  assert.deepEqual(second.removedStale, []);
+
+  const result = writeSettings(file, second.next);
+  assert.equal(result.written, false);
+  assert.equal(result.unchanged, true);
+  assert.equal(fs.readFileSync(file, 'utf8'), first);
+  assert.equal(fs.readdirSync(dir).filter((entry) => entry.includes('.bak-')).length, 1, 'no second backup');
 });
 
 test('writeSettings: install then uninstall round-trips the user settings', () => {

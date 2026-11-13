@@ -25,6 +25,7 @@ import {
   dshHome,
   listProfiles,
   patchHeader,
+  variantState,
 } from "../src/profiles.js";
 import { applyVariant, planVariant, removeVariant, syncVariant, variantBundles } from "../src/variant.js";
 
@@ -113,7 +114,7 @@ describe("listProfiles", () => {
     assert.deepEqual(listProfiles({ home }), []);
   });
 
-  test("reports a variant only when its directory carries the marker", () => {
+  test("reports variants and marks an unmarked directory as unowned", () => {
     const home = makeHome();
     const plan = planVariant("headless", { home });
     applyVariant(plan);
@@ -124,11 +125,24 @@ describe("listProfiles", () => {
     assert.equal(variant.isVariant, true);
     assert.deepEqual(variant.appBundles, []);
 
-    // An unmarked directory of the same name is not claimed by the tool.
+    // An unmarked directory of the same name is user data: it is reported as present but never claimed.
     const other = makeHome();
     mkdirSync(join(other, "profiles", "headless-acp"), { recursive: true });
     writeFileSync(join(other, "profiles", "headless-acp", "package.json"), JSON.stringify({ dsh: { profile: { bundles: [] } } }));
-    assert.equal(listProfiles({ home: other }).find((p) => p.name === "headless").variantExists, false);
+    const headless = listProfiles({ home: other }).find((profile) => profile.name === "headless");
+    assert.equal(headless.variantExists, true);
+    assert.equal(variantState("headless", { home: other }), "unowned");
+  });
+});
+
+describe("variantState", () => {
+  test("absent, owned and unowned variant directories", () => {
+    const home = makeHome();
+    assert.equal(variantState("web", { home }), "absent");
+    applyVariant(planVariant("web", { home }));
+    assert.equal(variantState("web", { home }), "owned");
+    mkdirSync(join(home, "profiles", "headless-acp"), { recursive: true });
+    assert.equal(variantState("headless", { home }), "unowned");
   });
 });
 
@@ -230,6 +244,15 @@ describe("planVariant", () => {
     assert.throws(() => planVariant("headless-acp", { home }), /is itself an ACP variant/);
   });
 
+  test("the plan says refuse, and stops there, when the target is not ours", () => {
+    const home = makeHome();
+    mkdirSync(join(home, "profiles", "headless-acp"), { recursive: true });
+    const plan = planVariant("headless", { home });
+    assert.equal(plan.actions.length, 1);
+    assert.match(plan.actions[0], /^refuse: .* exists without the \.t3code-bridge-dsh marker$/);
+    assert.equal(existsSync(join(plan.targetDir, "package.json")), false);
+  });
+
   test("APP_BUNDLES covers the shipped app bundles", () => {
     for (const bundle of [
       "@deepseek-ai/dsh-web-app",
@@ -283,6 +306,30 @@ describe("applyVariant", () => {
     assert.equal(readFileSync(join(target, "package.json"), "utf8"), packageBefore);
   });
 
+  test("keeps a copied cordis.yml in sync and drops a stale copy", () => {
+    const home = makeHome();
+    assert.equal(syncVariant("web", { home }).updated, false);
+    const target = join(home, "profiles", "web-acp");
+    assert.equal(readFileSync(join(target, "cordis.yml"), "utf8"), "plugins:\n  - id: core\n");
+
+    // The source loses cordis.yml: the variant's copy is stale and must go, and that counts as a change.
+    rmSync(join(home, "profiles", "web", "cordis.yml"));
+    assert.deepEqual(syncVariant("web", { home }), { created: false, updated: true, dir: target });
+    assert.equal(existsSync(join(target, "cordis.yml")), false);
+    assert.deepEqual(syncVariant("web", { home }), { created: false, updated: false, dir: target });
+  });
+
+  test("leaves a real node_modules directory someone installed into", () => {
+    const home = makeHome();
+    const plan = planVariant("headless", { home }); // the source has no node_modules
+    applyVariant(plan);
+    mkdirSync(join(plan.targetDir, "node_modules", "installed-pkg"), { recursive: true });
+    writeFileSync(join(plan.targetDir, "node_modules", "installed-pkg", "index.js"), "module.exports = 1;\n");
+    assert.deepEqual(syncVariant("headless", { home }), { created: false, updated: false, dir: plan.targetDir });
+    assert.ok(lstatSync(join(plan.targetDir, "node_modules")).isDirectory());
+    assert.ok(existsSync(join(plan.targetDir, "node_modules", "installed-pkg", "index.js")));
+  });
+
   test("a changed source profile is reported as updated", () => {
     const home = makeHome();
     applyVariant(planVariant("web", { home }));
@@ -331,6 +378,20 @@ describe("applyVariant", () => {
 
   test("rejects a plan it did not get from planVariant", () => {
     assert.throws(() => applyVariant({}), /expected a plan/);
+  });
+
+  test("repairs a variant left half-written (marker already present)", () => {
+    const home = makeHome();
+    const plan = planVariant("headless", { home });
+    mkdirSync(plan.targetDir, { recursive: true });
+    writeFileSync(
+      join(plan.targetDir, VARIANT_MARKER),
+      JSON.stringify({ source: "headless", createdAt: "2026-01-01T00:00:00.000Z" }),
+    );
+    assert.deepEqual(applyVariant(plan), { created: false, updated: true, dir: plan.targetDir });
+    assert.deepEqual(readJson(join(plan.targetDir, "package.json")), plan.packageJson);
+    // the original createdAt survives a repair
+    assert.equal(readJson(join(plan.targetDir, VARIANT_MARKER)).createdAt, "2026-01-01T00:00:00.000Z");
   });
 
   test("refuses to write through a symlinked target dir", () => {

@@ -225,6 +225,69 @@ process.stdin.on('data', (chunk) => {
   assert.equal(result.sessionCount, 0);
 });
 
+test('probeAcp: fallback shapes (top-level capabilities, array result) still read', async () => {
+  const dir = tempDir();
+  const script = writeFake(
+    dir,
+    'loose-agent',
+    `
+let buffer = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  buffer += chunk;
+  let i;
+  while ((i = buffer.indexOf('\\n')) !== -1) {
+    const line = buffer.slice(0, i).trim();
+    buffer = buffer.slice(i + 1);
+    if (!line) continue;
+    const msg = JSON.parse(line);
+    const result = msg.method === 'initialize'
+      ? { protocolVersion: 1, agentInfo: { name: 'loose' }, sessionCapabilities: { list: {} } }
+      : [{ sessionId: 's1' }];
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }) + '\\n');
+  }
+});
+`,
+  );
+
+  const result = await probeAcp({ command: process.execPath, args: [script], timeoutMs: 15000 });
+  assert.equal(result.ok, true, `unexpected error: ${result.error}`);
+  assert.deepEqual(result.sessionCapabilities, { list: {} });
+  assert.equal(result.sessionCount, 1);
+});
+
+test('probeAcp: a session/list failure still reports the agent info from initialize', async () => {
+  const dir = tempDir();
+  const script = writeFake(
+    dir,
+    'no-list-agent',
+    `
+let buffer = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  buffer += chunk;
+  let i;
+  while ((i = buffer.indexOf('\\n')) !== -1) {
+    const line = buffer.slice(0, i).trim();
+    buffer = buffer.slice(i + 1);
+    if (!line) continue;
+    const msg = JSON.parse(line);
+    const reply = msg.method === 'initialize'
+      ? { result: { protocolVersion: 1, agentInfo: { name: 'no-list' }, agentCapabilities: { sessionCapabilities: {} } } }
+      : { error: { code: -32601, message: 'session/list is not supported' } };
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, ...reply }) + '\\n');
+  }
+});
+`,
+  );
+
+  const result = await probeAcp({ command: process.execPath, args: [script], timeoutMs: 15000 });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /session\/list failed: session\/list is not supported \(-32601\)/);
+  assert.deepEqual(result.agentInfo, { name: 'no-list' }, 'initialize output survives the later failure');
+  assert.equal(result.protocolVersion, 1);
+});
+
 function isAlive(pid) {
   try {
     process.kill(pid, 0);

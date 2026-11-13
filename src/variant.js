@@ -6,6 +6,7 @@
 // are inherited. The directory is owned by this tool and carries VARIANT_MARKER; without the marker we
 // refuse to touch it.
 import {
+  existsSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -15,7 +16,6 @@ import {
   symlinkSync,
   unlinkSync,
   writeFileSync,
-  existsSync,
 } from "node:fs";
 import { join } from "node:path";
 import {
@@ -27,6 +27,7 @@ import {
   dshHome,
   listProfiles,
   patchHeader,
+  readProfile,
   variantName,
 } from "./profiles.js";
 
@@ -43,7 +44,13 @@ function isSymlink(path) {
   return Boolean(st && st.isSymbolicLink());
 }
 
-/** Directory exists and resolves to a dir (symlinks followed); false for a plain file. */
+/** True for an existing regular file (symlinks are not followed). */
+function isRegularFile(path) {
+  const st = lstatOrNull(path);
+  return Boolean(st && st.isFile());
+}
+
+/** True when `path` is an existing directory once links are resolved (a file or a dangling link is not). */
 function dirExists(path) {
   const st = lstatOrNull(path);
   if (!st) return false;
@@ -119,8 +126,10 @@ export function planVariant(name, { home = dshHome(), appBundles = APP_BUNDLES }
   const target = variantName(name);
   const targetDir = join(home, "profiles", target);
 
-  const pkg = JSON.parse(readFileSync(join(profile.dir, "package.json"), "utf8"));
-  const packageJson = structuredClone(pkg);
+  // readProfile already parsed and validated this file; copy it so the plan shares no object with it.
+  const sourcePkg = readProfile(profile.dir)?.pkg;
+  if (!sourcePkg) throw new Error(`planVariant: cannot read ${join(profile.dir, "package.json")}`);
+  const packageJson = structuredClone(sourcePkg);
   packageJson.name = `dsh-profile-${target}`;
   packageJson.dsh = packageJson.dsh || {};
   packageJson.dsh.profile = packageJson.dsh.profile || {};
@@ -130,11 +139,20 @@ export function planVariant(name, { home = dshHome(), appBundles = APP_BUNDLES }
 
   const actions = [];
   const targetState = lstatOrNull(targetDir);
+  let refused = false;
   if (!targetState) actions.push(`create ${targetDir}`);
-  else if (!dirExists(targetDir)) actions.push(`refuse: ${targetDir} exists and is not a directory`);
-  else if (!existsSync(join(targetDir, VARIANT_MARKER))) {
-    actions.push(`refuse: ${targetDir} exists without ${VARIANT_MARKER}`);
+  else if (targetState.isSymbolicLink()) {
+    actions.push(`refuse: ${targetDir} is a symlink`);
+    refused = true;
+  } else if (!dirExists(targetDir)) {
+    actions.push(`refuse: ${targetDir} exists and is not a directory`);
+    refused = true;
+  } else if (!existsSync(join(targetDir, VARIANT_MARKER))) {
+    actions.push(`refuse: ${targetDir} exists without the ${VARIANT_MARKER} marker`);
+    refused = true;
   }
+  // A refusal ends the plan: listing what would be written would read as if it were going to happen.
+  if (refused) return { source: name, target, sourceDir: profile.dir, targetDir, packageJson, patchYml, actions };
 
   actions.push(`write ${join(targetDir, "package.json")} (bundles: ${packageJson.dsh.profile.bundles.join(", ")})`);
   actions.push(`write ${join(targetDir, "cordis.patch.yml")}`);
@@ -143,13 +161,11 @@ export function planVariant(name, { home = dshHome(), appBundles = APP_BUNDLES }
   if (existsSync(cordisSource)) actions.push(`copy ${cordisSource} -> ${join(targetDir, "cordis.yml")}`);
 
   const modulesSource = join(profile.dir, "node_modules");
-  if (existsSync(modulesSource)) {
-    const link = join(targetDir, "node_modules");
-    const current = isSymlink(link) ? readlinkSync(link) : null;
-    if (current === modulesSource) actions.push(`keep symlink ${link} -> ${modulesSource}`);
-    else if (current) actions.push(`replace symlink ${link} -> ${modulesSource}`);
-    else actions.push(`link ${link} -> ${modulesSource}`);
-  }
+  const link = join(targetDir, "node_modules");
+  if (!existsSync(modulesSource)) actions.push(`no ${join(profile.dir, "node_modules")}: variant gets no module link`);
+  else if (isSymlink(link)) actions.push(`keep symlink ${link} -> ${modulesSource}`);
+  else if (existsSync(link)) actions.push(`keep ${link} (real directory, not replaced)`);
+  else actions.push(`link ${link} -> ${modulesSource}`);
 
   actions.push(`write ${join(targetDir, VARIANT_MARKER)}`);
 
@@ -174,20 +190,26 @@ function writeTextIfChanged(path, content) {
   return true;
 }
 
+/**
+ * What `<targetDir>/node_modules` needs: "skip" (no source modules), "ok" (already linked),
+ * "keep" (a real directory someone installed into: never delete it) or "link" (make the symlink).
+ */
+function linkState(sourceDir, targetDir) {
+  const source = join(sourceDir, "node_modules");
+  if (!existsSync(source)) return "skip";
+  const st = lstatOrNull(join(targetDir, "node_modules"));
+  if (!st) return "link";
+  if (!st.isSymbolicLink()) return "keep";
+  return readlinkSync(join(targetDir, "node_modules")) === source ? "ok" : "link";
+}
+
 /** Point `<targetDir>/node_modules` at the source's node_modules; true when the link was (re)made. */
 function linkNodeModules(sourceDir, targetDir) {
-  const source = join(sourceDir, "node_modules");
-  if (!existsSync(source)) return false;
+  const state = linkState(sourceDir, targetDir);
+  if (state !== "link") return false;
   const link = join(targetDir, "node_modules");
-  const st = lstatOrNull(link);
-  if (st && st.isSymbolicLink()) {
-    if (readlinkSync(link) === source) return false;
-    unlinkSync(link);
-  } else if (st) {
-    // A real directory here means someone installed into the variant; never delete it.
-    return false;
-  }
-  symlinkSync(source, link, "dir");
+  if (isSymlink(link)) unlinkSync(link);
+  symlinkSync(join(sourceDir, "node_modules"), link, "dir");
   return true;
 }
 
@@ -204,12 +226,12 @@ export function applyVariant(plan, { dryRun = false } = {}) {
   const existed = dirExists(targetDir);
 
   const targetStat = lstatOrNull(targetDir);
-  if (targetStat && !existed) {
-    throw new Error(`applyVariant: ${targetDir} exists and is not a directory`);
-  }
   if (targetStat && targetStat.isSymbolicLink()) {
     // Never write through a symlinked profile dir: the marker check cannot vouch for the real target.
     throw new Error(`applyVariant: refusing to write through the symlink ${targetDir}`);
+  }
+  if (targetStat && !existed) {
+    throw new Error(`applyVariant: ${targetDir} exists and is not a directory`);
   }
   if (existed && !existsSync(join(targetDir, VARIANT_MARKER))) {
     throw new Error(
@@ -222,17 +244,21 @@ export function applyVariant(plan, { dryRun = false } = {}) {
     [join(targetDir, "cordis.patch.yml"), withTrailingNewline(patchYml)],
   ]);
   const cordisSource = join(sourceDir, "cordis.yml");
+  const cordisTarget = join(targetDir, "cordis.yml");
   if (existsSync(cordisSource)) {
     const text = readTextOrNull(cordisSource);
-    if (text !== null) files.set(join(targetDir, "cordis.yml"), text);
+    if (text !== null) files.set(cordisTarget, text);
   }
+  // A cordis.yml the source no longer has is a stale copy this tool wrote; drop it.
+  const staleCordis = !files.has(cordisTarget) && isRegularFile(cordisTarget);
 
-  const wouldChangeFiles = [...files].some(([path, content]) => readTextOrNull(path) !== content);
+  const wouldChangeFiles =
+    staleCordis || [...files].some(([path, content]) => readTextOrNull(path) !== content);
   const marker = join(targetDir, VARIANT_MARKER);
   const currentMarker = readTextOrNull(marker);
   const markerJson = currentMarker === null ? null : safeParse(currentMarker);
   const markerChanged = !markerJson || markerJson.source !== source;
-  const wouldLink = existsSync(join(sourceDir, "node_modules")) && needsLink(sourceDir, targetDir);
+  const wouldLink = linkState(sourceDir, targetDir) === "link";
 
   if (dryRun) {
     return { created: !existed, updated: existed && (wouldChangeFiles || markerChanged || wouldLink), dir: targetDir };
@@ -241,11 +267,21 @@ export function applyVariant(plan, { dryRun = false } = {}) {
   if (!existed) mkdirSync(targetDir, { recursive: true });
 
   let changed = false;
+  if (!existed) {
+    // Claim the directory before anything else: a half-written variant must still be recognisable
+    // as ours, otherwise the next run would refuse to repair it.
+    writeTextIfChanged(marker, jsonText({ source, createdAt: new Date().toISOString() }));
+    changed = true;
+  }
   for (const [path, content] of files) {
     if (writeTextIfChanged(path, content)) changed = true;
   }
+  if (staleCordis) {
+    unlinkSync(cordisTarget);
+    changed = true;
+  }
   if (linkNodeModules(sourceDir, targetDir)) changed = true;
-  if (markerChanged) {
+  if (existed && markerChanged) {
     const createdAt = markerJson && markerJson.createdAt ? markerJson.createdAt : new Date().toISOString();
     if (writeTextIfChanged(marker, jsonText({ source, createdAt }))) changed = true;
   }
@@ -260,15 +296,6 @@ function safeParse(text) {
   } catch {
     return null;
   }
-}
-
-function needsLink(sourceDir, targetDir) {
-  const source = join(sourceDir, "node_modules");
-  const link = join(targetDir, "node_modules");
-  const st = lstatOrNull(link);
-  if (!st) return true;
-  if (!st.isSymbolicLink()) return false; // real dir: leave it alone
-  return readlinkSync(link) !== source;
 }
 
 /**

@@ -11,7 +11,9 @@ import os from 'node:os';
 import path from 'node:path';
 
 const OWNED_ID_RE = /^dsh-[a-z0-9][a-z0-9-]*$/;
-const OWNED_PROFILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*-acp$/;
+// the spec's shape is `["--profile", "<something>-acp"]`: any non-empty, whitespace-free
+// variant name, so a profile we did not name ourselves is still recognised as ours
+const OWNED_VARIANT_RE = /^\S+-acp$/;
 const DRIVER = 'acpRegistry';
 const BACKUP_SUFFIX = 'bridge-dsh';
 
@@ -58,9 +60,9 @@ export function buildInstance({ profile, dshPath, displayName, accentColor } = {
       enabled: true,
     },
   };
-  // accentColor stays absent unless asked for: T3 treats it as a display key the
-  // user may set in its own UI, and an explicit `undefined` would still count as a
-  // stored key in a deep comparison.
+  // Only a real colour is stored. An absent key keeps the value T3's own UI may
+  // have written (mergeInstance drops `undefined`), and it keeps the built value
+  // deep-equal to what a JSON round trip gives back.
   if (typeof accentColor === 'string' && accentColor.trim() !== '') value.accentColor = accentColor;
   return value;
 }
@@ -75,7 +77,7 @@ export function isOwnedInstance(id, value) {
   const args = config.commandArgs;
   if (!Array.isArray(args) || args.length !== 2) return false;
   if (args[0] !== '--profile') return false;
-  return typeof args[1] === 'string' && OWNED_PROFILE_RE.test(args[1]);
+  return typeof args[1] === 'string' && OWNED_VARIANT_RE.test(args[1]);
 }
 
 /**
@@ -100,12 +102,18 @@ export function planSettings(settingsObj, wanted) {
   const unchanged = [];
   const removedStale = [];
   const conflicts = [];
-  const wantedIds = new Set();
+  const wantedIds = new Map(); // id -> profile that claimed it
 
   for (const item of wanted) {
-    const id = instanceId(item && item.profile);
-    if (wantedIds.has(id)) continue; // duplicate profile in `wanted`: first wins
-    wantedIds.add(id);
+    const profile = item && item.profile;
+    const id = instanceId(profile);
+    if (wantedIds.has(id)) {
+      // the same profile twice is just a repeated input; two different profiles
+      // that slug to one id would silently overwrite each other, so report it
+      if (wantedIds.get(id) !== profile) conflicts.push(id);
+      continue;
+    }
+    wantedIds.set(id, profile);
 
     const desired = buildInstance(item);
     const current = instances[id];
@@ -230,7 +238,17 @@ function isPlainObject(value) {
 
 function mergeInstance(current, desired) {
   const currentConfig = isPlainObject(current.config) ? current.config : {};
-  return { ...current, ...desired, config: { ...currentConfig, ...desired.config } };
+  // an `undefined` in desired means "not specified": keep what is already there
+  // (e.g. an accent colour the user picked in T3's own UI)
+  const defined = {};
+  for (const [key, item] of Object.entries(desired)) {
+    if (item !== undefined) defined[key] = item;
+  }
+  const config = { ...currentConfig, ...desired.config };
+  for (const [key, item] of Object.entries(config)) {
+    if (item === undefined) delete config[key];
+  }
+  return { ...current, ...defined, config };
 }
 
 function parseSettings(raw, abs) {
