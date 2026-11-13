@@ -74,3 +74,13 @@ Rules: never edit the source profile; never write outside `$DSH_HOME/profiles/*-
 - dsbot/web profile app bundles may register capabilities (Telegram bot, web UI) that do not belong in an ACP
   variant; the replacement list of app bundles is configurable, default
   `dsh-web-app, dsh-headless, dsh-sdk-app, dsh-sdk-minimal, ds-bot, @deepseek-harness-tui/dsh-tui`.
+
+## Findings after install (2026-11-13)
+
+- Resume works: a follow-up to an existing T3 thread on a dsh instance is answered with the earlier context
+  (the launcher is respawned and T3 resumes the ACP session). Verified by a "repeat your previous reply" turn.
+- Native session list and import exist in T3 (`listSessions` / `importSession`, shown when the agent advertises
+  `session/list` and `load` or `resume`). dsh advertises list + resume, so `session/list` returns the real dsh
+  sessions per cwd (100 for the home directory, capped). dsh does not advertise `loadSession`, so an imported
+  thread has no replayed history, only a resumable session.
+- T3 shows no usage item for dsh runs. `usage` reads dsh's own counter instead.

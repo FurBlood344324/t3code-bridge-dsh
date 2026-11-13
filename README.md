@@ -1,10 +1,11 @@
 # t3code-bridge-dsh
 
-Run every [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) profile as a native
-[T3 Code](https://t3.codes) agent: thread agent, `delegate_task` subagent, model picker, usage. One T3 provider
+Run every DeepSeek Harness (`dsh`) profile as a native
+T3 Code agent: thread agent, `delegate_task` subagent, model picker, usage. One T3 provider
 instance per dsh profile, built on T3's `acpRegistry` (local command) driver and dsh's ACP app.
 
-Status: modules A–D implemented; `doctor` is the gate before you trust an install. See
+Unofficial: not affiliated with T3 Code or the dsh authors. Tested against T3 Code 0.1.9 and dsh 0.2.2-rc.1.
+`doctor` is the gate before you trust an install. How it works and what T3 can and cannot do with dsh sessions:
 [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Usage

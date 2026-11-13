@@ -1,12 +1,44 @@
 {
   "name": "t3code-bridge-dsh",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Run DeepSeek Harness (dsh) profiles as native T3 Code agents over ACP",
   "type": "module",
-  "bin": { "t3code-bridge-dsh": "bin/t3code-bridge-dsh.js" },
-  "files": ["bin", "src", "README.md", "LICENSE"],
-  "engines": { "node": ">=20" },
-  "scripts": { "test": "node --test" },
+  "bin": {
+    "t3code-bridge-dsh": "bin/t3code-bridge-dsh.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "prepublishOnly": "node --test"
+  },
   "license": "MIT",
-  "private": true
+  "keywords": [
+    "t3code",
+    "t3-code",
+    "dsh",
+    "deepseek",
+    "acp",
+    "agent-client-protocol",
+    "coding-agent"
+  ],
+  "author": "FurBlood344324",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FurBlood344324/t3code-bridge-dsh.git"
+  },
+  "bugs": {
+    "url": "https://github.com/FurBlood344324/t3code-bridge-dsh/issues"
+  },
+  "homepage": "https://github.com/FurBlood344324/t3code-bridge-dsh#readme",
+  "publishConfig": {
+    "access": "public"
+  }
 }
