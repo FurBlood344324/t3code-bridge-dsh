@@ -1,0 +1,12 @@
+{
+  "name": "t3code-bridge-dsh",
+  "version": "0.0.1",
+  "description": "Run DeepSeek Harness (dsh) profiles as native T3 Code agents over ACP",
+  "type": "module",
+  "bin": { "t3code-bridge-dsh": "bin/t3code-bridge-dsh.js" },
+  "files": ["bin", "src", "README.md", "LICENSE"],
+  "engines": { "node": ">=20" },
+  "scripts": { "test": "node --test" },
+  "license": "MIT",
+  "private": true
+}
