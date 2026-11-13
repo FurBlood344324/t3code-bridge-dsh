@@ -520,7 +520,10 @@ describe('usage', () => {
   test('--version prints the package version', async () => {
     const result = await run(['--version'], {});
     assert.equal(result.code, 0);
-    assert.equal(result.stdout.trim(), '0.0.1');
+    assert.equal(
+      result.stdout.trim(),
+      JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version,
+    );
   });
 
   test('--help prints the usage block', async () => {
