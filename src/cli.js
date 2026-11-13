@@ -27,6 +27,7 @@ import {
   t3SettingsPath,
   writeSettings,
 } from './t3settings.js';
+import { parseSince, readUsage } from './usage.js';
 import { applyVariant, planVariant, removeVariant, syncVariant } from './variant.js';
 
 /** Absolute path of the executable T3 spawns (`bin/t3code-bridge-dsh.js`, shebang + mode 755). */
@@ -52,6 +53,7 @@ usage:
   t3code-bridge-dsh sync [--dry-run]                refresh installed variants from their sources
   t3code-bridge-dsh launch <profile> [--verbose]    run the ACP agent for one profile (T3 spawns this)
   t3code-bridge-dsh doctor [--profile <p> ...]      check dsh, settings, variants, instances, ACP
+  t3code-bridge-dsh usage [--since YYYY-MM-DD] [--by model|day] [--json]   token totals from dsh's counter
   t3code-bridge-dsh --help | --version
 
 environment: DSH_HOME (~/.dsh), T3CODE_HOME (~/.t3), XDG_CONFIG_HOME (~/.config)
@@ -65,6 +67,7 @@ const COMMANDS = {
   sync: { run: cmdSync, flags: ['dry-run'], positional: 0 },
   launch: { run: cmdLaunch, flags: ['verbose'], positional: 1 },
   doctor: { run: cmdDoctor, flags: ['profile'], positional: 0 },
+  usage: { run: cmdUsage, flags: ['since', 'by', 'json'], positional: 0 },
 };
 
 /**
@@ -164,6 +167,27 @@ async function cmdProfiles({ env, home, out }) {
     ];
   });
   out(renderTable(['NAME', 'APP BUNDLES', 'VARIANT', 'INSTANCE'], rows));
+  return EXIT_OK;
+}
+
+async function cmdUsage({ flags, home, out }) {
+  const since = flags.since === null ? undefined : parseSince(flags.since);
+  const by = flags.by ?? 'model';
+  let result;
+  try {
+    result = await readUsage({ home, since, by });
+  } catch (error) {
+    throw new Refusal(messageOf(error));
+  }
+  if (flags.json) {
+    out(JSON.stringify({ by, since: flags.since, ...result }, null, 2));
+    return EXIT_OK;
+  }
+  const n = (value) => value.toLocaleString('en-US');
+  const rows = result.rows.map((r) => [r.group, n(r.calls), n(r.input), n(r.cacheRead), n(r.output)]);
+  rows.push(['TOTAL', n(result.total.calls), n(result.total.input), n(result.total.cacheRead), n(result.total.output)]);
+  out(renderTable([by === 'day' ? 'DAY' : 'PROVIDER / MODEL / KIND', 'CALLS', 'INPUT', 'CACHE READ', 'OUTPUT'], rows));
+  out(`source ${result.path} (dsh's counter has no profile column, so this is not split per profile)`);
   return EXIT_OK;
 }
 
@@ -585,7 +609,7 @@ function messageOf(error) {
 // --- argument parsing -----------------------------------------------------
 
 function parseArgs(argv) {
-  const flags = { profile: [], all: false, dryRun: false, write: false, verbose: false, help: false, version: false };
+  const flags = { since: null, by: null, json: false, profile: [], all: false, dryRun: false, write: false, verbose: false, help: false, version: false };
   const positional = [];
   let command = null;
   const list = Array.isArray(argv) ? argv : [];
@@ -604,6 +628,14 @@ function parseArgs(argv) {
       flags.write = true;
     } else if (arg === '--verbose') {
       flags.verbose = true;
+    } else if (arg === '--json') {
+      flags.json = true;
+    } else if (arg === '--since' || arg.startsWith('--since=') || arg === '--by' || arg.startsWith('--by=')) {
+      const name = arg.startsWith('--since') ? 'since' : 'by';
+      const value = arg.includes('=') ? arg.slice(arg.indexOf('=') + 1) : list[index + 1];
+      if (!arg.includes('=')) index += 1;
+      if (typeof value !== 'string' || value === '') throw new UsageError(`--${name} needs a value`);
+      flags[name] = value;
     } else if (arg === '--profile' || arg.startsWith('--profile=')) {
       const value = arg === '--profile' ? list[index + 1] : arg.slice('--profile='.length);
       if (arg === '--profile') index += 1;
@@ -627,5 +659,8 @@ function providedFlags(flags) {
   if (flags.write) names.push('write');
   if (flags.verbose) names.push('verbose');
   if (flags.profile.length > 0) names.push('profile');
+  if (flags.since !== null) names.push('since');
+  if (flags.by !== null) names.push('by');
+  if (flags.json) names.push('json');
   return names;
 }

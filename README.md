@@ -17,6 +17,7 @@ t3code-bridge-dsh install --all --dry-run     # say what would happen, write not
 t3code-bridge-dsh sync                        # refresh installed variants from their source profiles
 t3code-bridge-dsh uninstall --profile web     # remove that variant and its T3 instance only
 t3code-bridge-dsh routes --write              # model routes overlay (prints it without --write)
+t3code-bridge-dsh usage --since 2026-11-01    # token totals from dsh's own counter (--by day, --json)
 ```
 
 `install` does three things per selected dsh profile: writes `<DSH_HOME>/profiles/<name>-acp` (a copy
@@ -32,7 +33,14 @@ conflict), `--dry-run` writes nothing, and every settings write keeps a timestam
 Keys are read per request from the process env, then `<DSH_HOME>/.env`, then pi's `auth.json`, then
 opencode's `auth.json` — first hit wins, so a rotated key needs no reinstall. Values reach only the child
 process environment; `profiles`, `doctor` and `launch --verbose` print names, sources and lengths, never a
-key. Only the default route's key is required to be present.
+key. Only the default route's key is required to be present. The launcher puts the three route keys
+(`OPEN_DESIGN_API_KEY`, `COMMAND_CODE_API_KEY`, `OPENCODE_GO_API_KEY`) in the environment of the `dsh`
+process, so everything dsh runs for the agent (shell tools, plugins) inherits them: treat a profile's agent
+as trusted with those keys.
+
+`usage` reads `<DSH_HOME>/bot/usage.sqlite` (read-only). T3 itself shows no token usage for dsh runs, and
+dsh's counter has no profile column, so totals are grouped by provider/model/kind or by day, not per profile.
+`usage` needs Node ≥22.5 (`node:sqlite`); everything else runs on Node ≥20.
 
 Requires Node ≥20 and `dsh` on PATH (`node bin/t3code-bridge-dsh.js` works the same way if you would rather
 keep it local).
