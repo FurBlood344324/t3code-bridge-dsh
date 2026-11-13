@@ -8,7 +8,7 @@
 
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 /** First line of every generated overlay. */
 export const ROUTES_HEADER =
@@ -119,13 +119,14 @@ export const DEFAULT_ROUTES = freezeDeep({
 
 function homeDir(env = process.env) {
   const raw = env && typeof env.HOME === "string" ? env.HOME.trim() : "";
-  return resolve(raw || homedir());
+  return isAbsolute(raw) ? resolve(raw) : resolve(homedir());
 }
 
 /** `<XDG_CONFIG_HOME or ~/.config>/t3code-bridge-dsh/routes.yml`, always absolute. */
 export function overlayPath(env = process.env) {
   const xdg = env && typeof env.XDG_CONFIG_HOME === "string" ? env.XDG_CONFIG_HOME.trim() : "";
-  const base = xdg ? resolve(xdg) : join(homeDir(env), ".config");
+  // XDG spec: a relative XDG_CONFIG_HOME is invalid and ignored (it would resolve against T3's project cwd).
+  const base = isAbsolute(xdg) ? resolve(xdg) : join(homeDir(env), ".config");
   return join(base, "t3code-bridge-dsh", "routes.yml");
 }
 

@@ -18,7 +18,10 @@ import { defaultDshHome, resolveKeys } from './secrets.js';
 const PROFILE_RE = /^[a-z0-9][a-z0-9._-]*$/;
 
 /** Signals forwarded to the child. */
-export const FORWARDED_SIGNALS = Object.freeze(['SIGTERM', 'SIGINT', 'SIGHUP']);
+export const FORWARDED_SIGNALS = Object.freeze(['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGQUIT']);
+
+/** After the first forwarded signal a child gets this long before SIGKILL. */
+const KILL_GRACE_MS = 5000;
 
 /** Shell-style exit code for a child killed by a signal. */
 const SIGNAL_NUMBERS = Object.freeze({ SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGKILL: 9, SIGTERM: 15 });
@@ -148,20 +151,28 @@ export async function launch({
     }
 
     const handlers = new Map();
+    let escalation = null;
     const cleanup = () => {
+      if (escalation) clearTimeout(escalation);
       for (const [signal, handler] of handlers) process.removeListener(signal, handler);
       handlers.clear();
     };
 
+    // First signal is forwarded and arms a SIGKILL escalation, so a child that ignores SIGTERM cannot
+    // outlive its launcher forever; a repeated signal while the child lives escalates immediately.
+    const alive = () => child.exitCode === null && child.signalCode === null;
     for (const signal of FORWARDED_SIGNALS) {
       const handler = () => {
-        // A second signal is the operator insisting: do not swallow it.
-        if (child.exitCode !== null || child.signalCode !== null) {
-          cleanup();
-          process.kill(process.pid, signal);
+        if (!alive()) return;
+        if (escalation) {
+          child.kill('SIGKILL');
           return;
         }
         child.kill(signal);
+        escalation = setTimeout(() => {
+          if (alive()) child.kill('SIGKILL');
+        }, KILL_GRACE_MS);
+        escalation.unref();
       };
       handlers.set(signal, handler);
       process.on(signal, handler);

@@ -34,6 +34,16 @@ export const VARIANT_MARKER = ".t3code-bridge-dsh";
 /** The shipped ACP profile: the reference implementation, never a bridge source. */
 export const SHIPPED_ACP_PROFILE = "acp";
 
+/** Profile names are directory names under `<home>/profiles`: no separators, no `..`, no leading dot or dash. */
+export const PROFILE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/** Throw unless `name` is a safe profile directory name (never echoes the name: it may be a pasted secret). */
+export function assertProfileName(name, who = "profile") {
+  if (typeof name !== "string" || !PROFILE_NAME_RE.test(name) || name.includes("..")) {
+    throw new Error(`${who}: invalid profile name (allowed: letters, digits, ".", "_", "-"; no "..", no leading "." or "-")`);
+  }
+}
+
 /** Variant profile name for a source profile. */
 export function variantName(name) {
   return `${name}-acp`;
@@ -106,8 +116,9 @@ export function listProfiles({ home = dshHome() } = {}) {
   let entries;
   try {
     entries = readdirSync(profilesDir, { withFileTypes: true });
-  } catch {
-    return [];
+  } catch (err) {
+    if (err && err.code === "ENOENT") return [];
+    throw new Error(`listProfiles: cannot read ${profilesDir}: ${err && err.code ? err.code : "error"}`);
   }
 
   const names = entries

@@ -17,11 +17,13 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   ACP_BUNDLE,
   APP_BUNDLES,
   BASE_BUNDLE,
+  PROFILE_NAME_RE,
+  assertProfileName,
   SHIPPED_ACP_PROFILE,
   VARIANT_MARKER,
   dshHome,
@@ -109,9 +111,7 @@ export function variantPatch(name, sourceText) {
  *   packageJson: object, patchYml: string, actions: string[] }}
  */
 export function planVariant(name, { home = dshHome(), appBundles = APP_BUNDLES } = {}) {
-  if (typeof name !== "string" || name.trim() === "") {
-    throw new Error("planVariant: profile name must be a non-empty string");
-  }
+  assertProfileName(name, "planVariant");
   const profile = listProfiles({ home }).find((entry) => entry.name === name);
   if (!profile) {
     throw new Error(`planVariant: dsh profile "${name}" not found under ${join(home, "profiles")}`);
@@ -147,7 +147,7 @@ export function planVariant(name, { home = dshHome(), appBundles = APP_BUNDLES }
   } else if (!dirExists(targetDir)) {
     actions.push(`refuse: ${targetDir} exists and is not a directory`);
     refused = true;
-  } else if (!existsSync(join(targetDir, VARIANT_MARKER))) {
+  } else if (!isRegularFile(join(targetDir, VARIANT_MARKER))) {
     actions.push(`refuse: ${targetDir} exists without the ${VARIANT_MARKER} marker`);
     refused = true;
   }
@@ -223,6 +223,17 @@ export function applyVariant(plan, { dryRun = false } = {}) {
     throw new Error("applyVariant: expected a plan from planVariant");
   }
   const { source, sourceDir, targetDir, packageJson, patchYml } = plan;
+  // A plan is data: never trust its paths. The target must be `<something>/profiles/<valid-name>-acp`.
+  const targetName = basename(String(targetDir));
+  if (
+    basename(dirname(String(targetDir))) !== "profiles" ||
+    !targetName.endsWith("-acp") ||
+    !PROFILE_NAME_RE.test(targetName) ||
+    targetName.includes("..") ||
+    plan.target !== targetName
+  ) {
+    throw new Error("applyVariant: plan targetDir is not a valid variant directory");
+  }
   const existed = dirExists(targetDir);
 
   const targetStat = lstatOrNull(targetDir);
@@ -233,7 +244,7 @@ export function applyVariant(plan, { dryRun = false } = {}) {
   if (targetStat && !existed) {
     throw new Error(`applyVariant: ${targetDir} exists and is not a directory`);
   }
-  if (existed && !existsSync(join(targetDir, VARIANT_MARKER))) {
+  if (existed && !isRegularFile(join(targetDir, VARIANT_MARKER))) {
     throw new Error(
       `applyVariant: refusing to overwrite ${targetDir}: it exists without the ${VARIANT_MARKER} marker`,
     );
@@ -304,16 +315,14 @@ function safeParse(text) {
  * @returns {{ removed: boolean }}
  */
 export function removeVariant(name, { home = dshHome(), dryRun = false } = {}) {
-  if (typeof name !== "string" || name.trim() === "") {
-    throw new Error("removeVariant: profile name must be a non-empty string");
-  }
+  assertProfileName(name, "removeVariant");
   const sourceDir = join(home, "profiles", name);
   const targetDir = join(home, "profiles", variantName(name));
   if (targetDir === sourceDir) return { removed: false };
 
   const st = lstatOrNull(targetDir);
   if (!st || !dirExists(targetDir)) return { removed: false };
-  if (!existsSync(join(targetDir, VARIANT_MARKER))) return { removed: false };
+  if (!isRegularFile(join(targetDir, VARIANT_MARKER))) return { removed: false };
   if (dryRun) return { removed: true };
 
   if (st.isSymbolicLink()) {

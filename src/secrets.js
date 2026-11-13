@@ -9,7 +9,7 @@
 
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 /** Source tokens used in reports (stable strings: they appear in operator-facing output). */
 export const SOURCE_ENV = "env";
@@ -75,7 +75,7 @@ export const KEY_NAMES = Object.freeze(SOURCES.map((entry) => entry.name));
 
 function homeOf(env) {
   const raw = env && typeof env.HOME === "string" ? env.HOME.trim() : "";
-  return resolve(raw || homedir());
+  return isAbsolute(raw) ? resolve(raw) : resolve(homedir());
 }
 
 /** `<DSH_HOME>` or `~/.dsh`, absolute. Kept local so this module does not depend on profiles.js. */
@@ -101,7 +101,7 @@ const AUTH_VALUE_FIELDS = Object.freeze(["key", "apiKey", "token", "accessToken"
 function authValue(json, provider) {
   if (!json || typeof json !== "object") return null;
   const entry = json[provider];
-  if (typeof entry === "string") return entry;
+  if (typeof entry === "string") return entry.trim() || null;
   if (!entry || typeof entry !== "object") return null;
   for (const field of AUTH_VALUE_FIELDS) {
     const value = entry[field];
@@ -110,18 +110,34 @@ function authValue(json, provider) {
   return null;
 }
 
-/** Strip one layer of matching quotes and expand the few escapes a `.env` file really uses. */
+const DOUBLE_QUOTE_ESCAPES = Object.freeze({ n: "\n", t: "\t", '"': '"', "\\": "\\" });
+
+/**
+ * Read a value: a leading quote is closed by its matching quote and anything after it (a trailing
+ * `# comment`) is ignored; escapes in double quotes are expanded in ONE pass so `\\n` stays a
+ * backslash plus `n`. An unquoted value ends at whitespace followed by `#`.
+ */
 function unquote(raw) {
   const text = raw.trim();
-  if (text.length >= 2) {
-    const quote = text[0];
-    if ((quote === '"' || quote === "'") && text[text.length - 1] === quote) {
-      const inner = text.slice(1, -1);
-      if (quote === "'") return inner;
-      return inner.replace(/\\n/g, "\n").replace(/\\t/g, "\t").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+  const quote = text[0];
+  if (quote === '"' || quote === "'") {
+    let i = 1;
+    let out = "";
+    for (; i < text.length; i += 1) {
+      const ch = text[i];
+      if (quote === '"' && ch === "\\" && i + 1 < text.length) {
+        const mapped = DOUBLE_QUOTE_ESCAPES[text[i + 1]];
+        if (mapped !== undefined) {
+          out += mapped;
+          i += 1;
+          continue;
+        }
+      }
+      if (ch === quote) return out;
+      out += ch;
     }
+    // no closing quote: treat the whole text as an unquoted literal below
   }
-  // Unquoted value: a `#` only starts a comment when whitespace precedes it.
   const hash = text.search(/\s#/);
   return (hash === -1 ? text : text.slice(0, hash)).trim();
 }

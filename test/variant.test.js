@@ -239,7 +239,7 @@ describe("planVariant", () => {
     const home = makeHome();
     assert.throws(() => planVariant("nope", { home }), /not found/);
     assert.throws(() => planVariant("acp", { home }), /shipped ACP profile/);
-    assert.throws(() => planVariant("", { home }), /non-empty string/);
+    assert.throws(() => planVariant("", { home }), /invalid profile name/);
     applyVariant(planVariant("headless", { home }));
     assert.throws(() => planVariant("headless-acp", { home }), /is itself an ACP variant/);
   });
@@ -427,7 +427,7 @@ describe("removeVariant", () => {
     assert.equal(existsSync(join(home, "profiles", "web-acp", "package.json")), true);
 
     assert.deepEqual(removeVariant("headless", { home }), { removed: false });
-    assert.throws(() => removeVariant("", { home }), /non-empty string/);
+    assert.throws(() => removeVariant("", { home }), /invalid profile name/);
   });
 
   test("dry run removes nothing", () => {
@@ -466,4 +466,51 @@ describe("syncVariant", () => {
       dir: join(home, "profiles", "headless-acp"),
     });
   });
+});
+
+// --- review fixes (review-AB findings 1, 5, 7) ---
+import { mkdtempSync as mk2, mkdirSync as mkd2, writeFileSync as wf2, existsSync as ex2, symlinkSync as sl2 } from "node:fs";
+import { tmpdir as td2 } from "node:os";
+import { join as j2 } from "node:path";
+import { test as t3 } from "node:test";
+import a3 from "node:assert/strict";
+import { removeVariant as rv3, applyVariant as av3, planVariant as pv3 } from "../src/variant.js";
+import { listProfiles as lp3 } from "../src/profiles.js";
+
+t3("removeVariant rejects traversal names and leaves outside dirs alone", () => {
+  const root = mk2(j2(td2(), "bridge-trav-"));
+  const home = j2(root, "dsh");
+  mkd2(j2(home, "profiles"), { recursive: true });
+  const evil = j2(home, "evil-acp");
+  mkd2(evil);
+  wf2(j2(evil, ".t3code-bridge-dsh"), "{}");
+  a3.throws(() => rv3("../evil", { home }), /invalid profile name/);
+  a3.throws(() => rv3("a/b", { home }), /invalid profile name/);
+  a3.ok(ex2(evil));
+});
+
+t3("planVariant and applyVariant refuse bad names and forged plans", () => {
+  const home = mk2(j2(td2(), "bridge-forge-"));
+  mkd2(j2(home, "profiles"), { recursive: true });
+  a3.throws(() => pv3("../x", { home }), /invalid profile name/);
+  a3.throws(() => av3({ source: "x", target: "evil", targetDir: j2(home, "evil"), sourceDir: home, packageJson: {}, patchYml: "" }), /not a valid variant directory/);
+  a3.throws(() => av3({ source: "x", target: "x-acp", targetDir: j2(home, "x-acp"), sourceDir: home, packageJson: {}, patchYml: "" }), /not a valid variant directory/);
+});
+
+t3("a symlinked marker does not count as ownership", () => {
+  const home = mk2(j2(td2(), "bridge-mark-"));
+  const dir = j2(home, "profiles", "p-acp");
+  mkd2(dir, { recursive: true });
+  const real = j2(home, "real-marker");
+  wf2(real, "{}");
+  sl2(real, j2(dir, ".t3code-bridge-dsh"));
+  a3.equal(rv3("p", { home }).removed, false);
+  a3.ok(ex2(dir));
+});
+
+t3("listProfiles throws on unreadable profiles dir but not on a missing one", () => {
+  const home = mk2(j2(td2(), "bridge-list-"));
+  a3.deepEqual(lp3({ home }), []);
+  wf2(j2(home, "profiles"), "not a dir");
+  a3.throws(() => lp3({ home }), /cannot read/);
 });

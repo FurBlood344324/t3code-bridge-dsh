@@ -260,3 +260,28 @@ describe("paths", () => {
     assert.equal(resolved.OPEN_DESIGN_API_KEY, FAKE.dotenvKey, "the env's DSH_HOME is used when none is passed");
   });
 });
+
+// --- review fixes (review-C findings 1-3, 5) ---
+import { test as t2 } from "node:test";
+import assert2 from "node:assert/strict";
+import { parseDotEnv as parseEnv2 } from "../src/secrets.js";
+import { overlayPath as overlayPath2 } from "../src/routes.js";
+
+t2("dotenv: quoted value followed by a comment keeps only the quoted text", () => {
+  assert2.equal(parseEnv2('A="abc" # prod\nB=\'x y\' # c\n').get("A"), "abc");
+  assert2.equal(parseEnv2('B=\'x y\' # c\n').get("B"), "x y");
+});
+
+t2("dotenv: escapes are expanded in one pass (\\\\n stays backslash + n)", () => {
+  assert2.equal(parseEnv2('A="a\\\\nb"\n').get("A"), "a\\nb");
+  assert2.equal(parseEnv2('A="a\\nb"\n').get("A"), "a\nb");
+});
+
+t2("dotenv: unterminated quote falls back to the literal text", () => {
+  assert2.equal(parseEnv2('A="abc\n').get("A"), '"abc');
+});
+
+t2("overlayPath ignores a relative XDG_CONFIG_HOME", () => {
+  const p = overlayPath2({ XDG_CONFIG_HOME: "cfg", HOME: "/home/x" });
+  assert2.equal(p, "/home/x/.config/t3code-bridge-dsh/routes.yml");
+});
